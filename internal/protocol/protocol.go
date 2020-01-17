@@ -51,7 +51,7 @@ const MaxReceivePacketSize ByteCount = 1452
 
 // DefaultTCPMSS is the default maximum packet size used in the Linux TCP implementation.
 // Used in QUIC for congestion window computations in bytes.
-const DefaultTCPMSS ByteCount = 1460
+const DefaultTCPMSS ByteCount = 1260
 
 // MinInitialPacketSize is the minimum size an Initial packet is required to have.
 const MinInitialPacketSize = 1200
