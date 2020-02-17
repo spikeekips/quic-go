@@ -8,11 +8,13 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/lucas-clemente/quic-go/internal/congestion"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/qerr"
 	"github.com/lucas-clemente/quic-go/internal/utils"
+	"github.com/lucas-clemente/quic-go/qlog"
 	"github.com/marten-seemann/qtls"
 )
 
@@ -89,7 +91,8 @@ type cryptoSetup struct {
 
 	rttStats *congestion.RTTStats
 
-	logger utils.Logger
+	qlogger qlog.Tracer
+	logger  utils.Logger
 
 	perspective protocol.Perspective
 
@@ -129,6 +132,7 @@ func NewCryptoSetupClient(
 	tlsConf *tls.Config,
 	enable0RTT bool,
 	rttStats *congestion.RTTStats,
+	qlogger qlog.Tracer,
 	logger utils.Logger,
 ) (CryptoSetup, <-chan *TransportParameters /* ClientHello written. Receive nil for non-0-RTT */) {
 	cs, clientHelloWritten := newCryptoSetup(
@@ -140,6 +144,7 @@ func NewCryptoSetupClient(
 		tlsConf,
 		enable0RTT,
 		rttStats,
+		qlogger,
 		logger,
 		protocol.PerspectiveClient,
 	)
@@ -159,6 +164,7 @@ func NewCryptoSetupServer(
 	tlsConf *tls.Config,
 	enable0RTT bool,
 	rttStats *congestion.RTTStats,
+	qlogger qlog.Tracer,
 	logger utils.Logger,
 ) CryptoSetup {
 	cs, _ := newCryptoSetup(
@@ -170,6 +176,7 @@ func NewCryptoSetupServer(
 		tlsConf,
 		enable0RTT,
 		rttStats,
+		qlogger,
 		logger,
 		protocol.PerspectiveServer,
 	)
@@ -186,10 +193,16 @@ func newCryptoSetup(
 	tlsConf *tls.Config,
 	enable0RTT bool,
 	rttStats *congestion.RTTStats,
+	qlogger qlog.Tracer,
 	logger utils.Logger,
 	perspective protocol.Perspective,
 ) (*cryptoSetup, <-chan *TransportParameters /* ClientHello written. Receive nil for non-0-RTT */) {
 	initialSealer, initialOpener := NewInitialAEAD(connID, perspective)
+	if qlogger != nil {
+		now := time.Now()
+		qlogger.UpdatedKeyFromTLS(now, protocol.EncryptionInitial, protocol.PerspectiveClient)
+		qlogger.UpdatedKeyFromTLS(now, protocol.EncryptionInitial, protocol.PerspectiveServer)
+	}
 	extHandler := newExtensionHandler(tp.Marshal(), perspective)
 	cs := &cryptoSetup{
 		initialStream:          initialStream,
@@ -203,6 +216,7 @@ func newCryptoSetup(
 		ourParams:              tp,
 		paramsChan:             extHandler.TransportParameters(),
 		rttStats:               rttStats,
+		qlogger:                qlogger,
 		logger:                 logger,
 		perspective:            perspective,
 		handshakeDone:          make(chan struct{}),
@@ -223,6 +237,11 @@ func (h *cryptoSetup) ChangeConnectionID(id protocol.ConnectionID) {
 	initialSealer, initialOpener := NewInitialAEAD(id, h.perspective)
 	h.initialSealer = initialSealer
 	h.initialOpener = initialOpener
+	if h.qlogger != nil {
+		now := time.Now()
+		h.qlogger.UpdatedKeyFromTLS(now, protocol.EncryptionInitial, protocol.PerspectiveClient)
+		h.qlogger.UpdatedKeyFromTLS(now, protocol.EncryptionInitial, protocol.PerspectiveServer)
+	}
 }
 
 func (h *cryptoSetup) SetLargest1RTTAcked(pn protocol.PacketNumber) {
@@ -556,6 +575,9 @@ func (h *cryptoSetup) SetReadKey(encLevel qtls.EncryptionLevel, suite *qtls.Ciph
 			newHeaderProtector(suite, trafficSecret, true),
 		)
 		h.mutex.Unlock()
+		if h.qlogger != nil {
+			h.qlogger.UpdatedKeyFromTLS(time.Now(), protocol.Encryption0RTT, h.perspective.Opposite())
+		}
 		h.logger.Debugf("Installed 0-RTT Read keys (using %s)", cipherSuiteName(suite.ID))
 		return
 	case qtls.EncryptionHandshake:
@@ -576,6 +598,9 @@ func (h *cryptoSetup) SetReadKey(encLevel qtls.EncryptionLevel, suite *qtls.Ciph
 		panic("unexpected read encryption level")
 	}
 	h.mutex.Unlock()
+	if h.qlogger != nil {
+		h.qlogger.UpdatedKeyFromTLS(time.Now(), h.readEncLevel, h.perspective.Opposite())
+	}
 	h.receivedReadKey <- struct{}{}
 }
 
@@ -591,6 +616,9 @@ func (h *cryptoSetup) SetWriteKey(encLevel qtls.EncryptionLevel, suite *qtls.Cip
 			newHeaderProtector(suite, trafficSecret, true),
 		)
 		h.mutex.Unlock()
+		if h.qlogger != nil {
+			h.qlogger.UpdatedKeyFromTLS(time.Now(), protocol.Encryption0RTT, h.perspective)
+		}
 		h.logger.Debugf("Installed 0-RTT Write keys (using %s)", cipherSuiteName(suite.ID))
 		return
 	case qtls.EncryptionHandshake:
@@ -615,6 +643,9 @@ func (h *cryptoSetup) SetWriteKey(encLevel qtls.EncryptionLevel, suite *qtls.Cip
 		panic("unexpected write encryption level")
 	}
 	h.mutex.Unlock()
+	if h.qlogger != nil {
+		h.qlogger.UpdatedKeyFromTLS(time.Now(), h.writeEncLevel, h.perspective)
+	}
 	h.receivedWriteKey <- struct{}{}
 }
 
